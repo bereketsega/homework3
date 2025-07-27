@@ -5,6 +5,7 @@ from torch.utils.data import ConcatDataset, DataLoader, Dataset
 
 from . import road_transforms
 from .road_utils import Track
+from torchvision import transforms
 
 
 class RoadDataset(Dataset):

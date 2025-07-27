@@ -7,6 +7,20 @@ HOMEWORK_DIR = Path(__file__).resolve().parent
 INPUT_MEAN = [0.2788, 0.2657, 0.2629]
 INPUT_STD = [0.2064, 0.1944, 0.2252]
 
+class ClassificationLoss(nn.Module):
+    def forward(self, logits: torch.Tensor, target: torch.LongTensor) -> torch.Tensor:
+        """
+        Multi-class classification loss
+        Hint: simple one-liner
+
+        Args:
+            logits: tensor (b, c) logits, where c is the number of classes
+            target: tensor (b,) labels
+
+        Returns:
+            tensor, scalar loss
+        """
+        return nn.CrossEntropyLoss()(logits, target)
 
 class Classifier(nn.Module):
     def __init__(
@@ -23,11 +37,33 @@ class Classifier(nn.Module):
         """
         super().__init__()
 
-        self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
-        self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
+        self.register_buffer("input_mean", torch.tensor(INPUT_MEAN).view(3, 1, 1))
+        self.register_buffer("input_std", torch.tensor(INPUT_STD).view(3, 1, 1))
 
-        # TODO: implement
-        pass
+        self.features = nn.Sequential(
+            nn.Conv2d(in_channels, 32, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(32, 64, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+
+            nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=1),
+            nn.BatchNorm2d(128),
+            nn.ReLU(),
+            nn.MaxPool2d(2),
+        )
+
+        self.classifier = nn.Sequential(
+            nn.Flatten(),
+            nn.Linear(128 * 8 * 8, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, num_classes)
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -37,12 +73,9 @@ class Classifier(nn.Module):
         Returns:
             tensor (b, num_classes) logits
         """
-        # optional: normalizes the input
-        z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
-
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 6)
-
+        z = (x - self.input_mean) / self.input_std
+        z = self.features(z)
+        logits = self.classifier(z)
         return logits
 
     def predict(self, x: torch.Tensor) -> torch.Tensor:
@@ -60,48 +93,66 @@ class Classifier(nn.Module):
         return self(x).argmax(dim=1)
 
 
-class Detector(torch.nn.Module):
+class Detector(nn.Module):
     def __init__(
         self,
         in_channels: int = 3,
-        num_classes: int = 3,
+        num_segmentation_classes: int = 3,
     ):
-        """
-        A single model that performs segmentation and depth regression
-
-        Args:
-            in_channels: int, number of input channels
-            num_classes: int
-        """
         super().__init__()
 
-        self.register_buffer("input_mean", torch.as_tensor(INPUT_MEAN))
-        self.register_buffer("input_std", torch.as_tensor(INPUT_STD))
+        self.down1 = nn.Sequential(
+            nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
+            nn.BatchNorm2d(16),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
 
-        # TODO: implement
-        pass
+        self.down2 = nn.Sequential(
+            nn.Conv2d(16, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.MaxPool2d(2)
+        )
 
-    def forward(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        """
-        Used in training, takes an image and returns raw logits and raw depth.
-        This is what the loss functions use as input.
+        self.bottleneck = nn.Sequential(
+            nn.Conv2d(32, 64, kernel_size=3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU()
+        )
 
-        Args:
-            x (torch.FloatTensor): image with shape (b, 3, h, w) and vals in [0, 1]
+        self.up1 = nn.Sequential(
+            nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2),
+            nn.ReLU()
+        )
 
-        Returns:
-            tuple of (torch.FloatTensor, torch.FloatTensor):
-                - logits (b, num_classes, h, w)
-                - depth (b, h, w)
-        """
-        # optional: normalizes the input
-        z = (x - self.input_mean[None, :, None, None]) / self.input_std[None, :, None, None]
+        self.up2 = nn.Sequential(
+            nn.ConvTranspose2d(32 + 16, 16, kernel_size=2, stride=2),
+            nn.ReLU()
+        )
 
-        # TODO: replace with actual forward pass
-        logits = torch.randn(x.size(0), 3, x.size(2), x.size(3))
-        raw_depth = torch.rand(x.size(0), x.size(2), x.size(3))
+        self.segmentation_head = nn.Conv2d(16, num_segmentation_classes, kernel_size=1)
+        self.depth_head = nn.Conv2d(16, 1, kernel_size=1)
 
-        return logits, raw_depth
+    def forward(self, x: torch.Tensor):
+        # Encoder
+        x1 = self.down1(x)
+        x2 = self.down2(x1)     
+
+        # Bottleneck
+        x3 = self.bottleneck(x2)  
+
+        # Decoder with skip connections
+        x4 = self.up1(x3)       
+        x4 = torch.cat([x4, x1], dim=1) 
+
+        x5 = self.up2(x4)      
+
+        # Output heads
+        seg_logits = self.segmentation_head(x5)  
+        depth = self.depth_head(x5).squeeze(1)   
+
+        return seg_logits, depth
 
     def predict(self, x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """
@@ -168,11 +219,10 @@ def save_model(model: torch.nn.Module) -> str:
     model_name = None
 
     for n, m in MODEL_FACTORY.items():
-        if type(model) is m:
-            model_name = n
-
+      if type(model) is m:
+        model_name = n
     if model_name is None:
-        raise ValueError(f"Model type '{str(type(model))}' not supported")
+      raise ValueError(f"Model type '{str(type(model))}' not supported")
 
     output_path = HOMEWORK_DIR / f"{model_name}.th"
     torch.save(model.state_dict(), output_path)
